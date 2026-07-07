@@ -11,17 +11,9 @@ def run_server(
     port: int = 8000,
     reload: bool = False,
     workers: Optional[int] = None,
+    app_str: Optional[str] = None,
     **uvicorn_kwargs,
 ):
-    """
-    Executa o servidor Uvicorn com suporte a múltiplos workers.
-
-    - Se `reload=True`, usa a instância diretamente (workers é ignorado).
-    - Se `workers` for None, usa o número de CPUs (padrão).
-    - Se `workers > 1`, tenta detectar a variável que contém a instância
-        no módulo __main__ para passar a string ao Uvicorn.
-    - Caso contrário, passa a instância diretamente.
-    """
     if reload:
         uvicorn.run(app, host=host, port=port, reload=True, **uvicorn_kwargs)
         return
@@ -29,21 +21,26 @@ def run_server(
     if workers is None:
         workers = cpu_count() or 1
 
-    if workers > 1:
-        main_module = sys.modules.get("__main__")
-        app_str = None
-        if main_module:
-            for var_name, obj in inspect.getmembers(main_module):
-                if obj is app:
-                    app_str = f"{main_module.__name__}:{var_name}"
-                    break
+    if app_str is not None:
+        uvicorn.run(app_str, host=host, port=port, workers=workers, **uvicorn_kwargs)
+        return
 
-        if app_str:
-            uvicorn.run(
-                app_str, host=host, port=port, workers=workers, **uvicorn_kwargs
-            )
-        else:
-            print("⚠️  Could not detect instance variable, using single worker.")
-            uvicorn.run(app, host=host, port=port, **uvicorn_kwargs)
-    else:
+    if workers <= 1:
         uvicorn.run(app, host=host, port=port, **uvicorn_kwargs)
+        return
+
+    main_module = sys.modules.get("__main__")
+    detected = None
+    if main_module:
+        for var_name, obj in inspect.getmembers(main_module):
+            if obj is app:
+                detected = f"{main_module.__name__}:{var_name}"
+                break
+
+    if detected:
+        uvicorn_kwargs.setdefault("lifespan", "on")
+        uvicorn.run(detected, host=host, port=port, workers=workers, **uvicorn_kwargs)
+    else:
+        fallback = f"{main_module.__name__}:app" if main_module else "app:app"
+        uvicorn_kwargs.setdefault("lifespan", "on")
+        uvicorn.run(fallback, host=host, port=port, workers=workers, **uvicorn_kwargs)
