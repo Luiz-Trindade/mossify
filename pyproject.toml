@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mossify"
+version = "0.1.2"
+description = "🌿 Mossify – A simple, organic framework for FastAPI + SQLModel with automatic CRUD and intelligent caching."
+readme = "README.md"
+authors = [
+    {name = "Luiz Gabriel Magalhães Trindade", email = "luiz.gabriel.m.trindade@gmail.com"}
+]
+license = {text = "MIT"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.100.0",
+    "sqlmodel>=0.0.14",
+    "uvicorn>=0.23.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/seu-usuario/mossify"
+Repository = "https://github.com/seu-usuario/mossify"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0",
+]
