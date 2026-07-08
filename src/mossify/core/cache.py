@@ -7,6 +7,7 @@ class CacheManager:
         self.cache = Cache(cache_dir)
         self.default_ttl = ttl
         self._prefixes = set()
+        self._async_prefixes = set()
 
     def get(self, key: str):
         return self.cache.get(key)
@@ -24,6 +25,15 @@ class CacheManager:
     def add_prefix(self, prefix: str):
         self._prefixes.add(prefix)
 
+    def add_async_prefix(self, prefix: str):
+        """Marcar prefixo como assíncrono: middleware não invalida, quem faz é o QueueManager."""
+        self._async_prefixes.add(prefix)
+        self._prefixes.add(prefix)
+
     @property
     def prefixes(self):
         return self._prefixes
+
+    @property
+    def async_prefixes(self):
+        return self._async_prefixes

@@ -13,6 +13,6 @@ class CacheInvalidationMiddleware(BaseHTTPMiddleware):
         if request.method in ["POST", "PUT", "DELETE", "PATCH"]:
             path = request.url.path.rstrip("/")
             for prefix in self.cache_manager.prefixes:
-                if path.startswith(prefix):
+                if path.startswith(prefix) and prefix not in self.cache_manager.async_prefixes:
                     self.cache_manager.invalidate_prefix(prefix)
         return response

@@ -20,7 +20,7 @@ class ModelRegistry:
         exclude: Optional[List[str]] = None,
         pagination_default_size: int = 20,
         pagination_max_size: int = 100,
-        async_mode: bool = False,
+        async_mode: bool = False,  # Se True, usa fila para POST, PUT, PATCH, DELETE
         batch_size: int = 1000,
         flush_interval: float = 5.0,
         auth_dep: Optional[Any] = None,
@@ -73,10 +73,25 @@ class ModelRegistry:
         def get_session():
             yield from self.db_manager.get_session()
 
-        # Monta a lista de dependências (combina auth_dep com outras fornecidas)
+        # Cria o QueueManager se estiver em modo assíncrono
+        if async_mode and model_class not in self._queue_managers:
+            qm = QueueManager(
+                self.db_manager,
+                model_class,
+                batch_size=batch_size,
+                flush_interval=flush_interval,
+                cache_manager=self.router_builder.cache,
+                cache_prefix=prefix,
+            )
+            self._queue_managers[model_class] = qm
+            # Marca o prefixo como async: middleware não invalida cache
+            # (quem invalida é o QueueManager após o flush real no banco)
+            self.router_builder.cache.add_async_prefix(prefix)
+
+        # Monta dependências
         dependencies = []
         if auth_dep:
-            dependencies.append(Depends(auth_dep))  # <-- envolve com Depends
+            dependencies.append(Depends(auth_dep))
         if "dependencies" in route_kwargs:
             deps = route_kwargs.pop("dependencies")
             if isinstance(deps, list):
@@ -86,8 +101,9 @@ class ModelRegistry:
         if dependencies:
             route_kwargs["dependencies"] = dependencies
 
-        # --- Rotas (todas async) ---
-        # A ordem é importante: count deve vir antes de {item_id}
+        # ============================================================
+        # ROTAS GET (síncronas, com cache)
+        # ============================================================
 
         # 1. Listar
         if "list" not in exclude_set:
@@ -120,7 +136,7 @@ class ModelRegistry:
 
             list_items.__name__ = f"list_{model_class.__name__.lower()}"
 
-        # 2. Contar (deve vir antes de /{item_id})
+        # 2. Contar
         if "count" not in exclude_set:
 
             @self.router_builder.register_route(
@@ -137,17 +153,31 @@ class ModelRegistry:
 
             count_items.__name__ = f"count_{model_class.__name__.lower()}"
 
-        # 3. Criar (com ou sem fila)
+        # 3. Obter
+        if "read" not in exclude_set:
+
+            @self.router_builder.register_route(
+                f"{prefix}/{{item_id}}",
+                methods=["GET"],
+                response_model=model_class,
+                cache_prefix=prefix,
+                **route_kwargs,
+            )
+            async def get_item(item_id: int, session: Session = Depends(get_session)):
+                item = session.get(model_class, item_id)
+                if not item:
+                    raise HTTPException(status_code=404, detail="Item not found")
+                return item
+
+            get_item.__name__ = f"get_{model_class.__name__.lower()}"
+
+        # ============================================================
+        # ROTAS DE ESCRITA (com ou sem fila, conforme async_mode)
+        # ============================================================
+
+        # 4. Criar (POST)
         if "create" not in exclude_set:
             if async_mode:
-                if model_class not in self._queue_managers:
-                    qm = QueueManager(
-                        self.db_manager,
-                        model_class,
-                        batch_size=batch_size,
-                        flush_interval=flush_interval,
-                    )
-                    self._queue_managers[model_class] = qm
 
                 @self.router_builder.register_route(
                     prefix,
@@ -156,12 +186,10 @@ class ModelRegistry:
                     cache_prefix=prefix,
                     **route_kwargs,
                 )
-                async def create_item_async(
-                    data: CreateModel = Body(...),
-                ):
+                async def create_item_async(data: CreateModel = Body(...)):
                     qm = self._queue_managers[model_class]
-                    temp_id = await qm.enqueue(data.model_dump())
-                    return {"status": "accepted", "id": temp_id}
+                    await qm.enqueue("create", data.model_dump())
+                    return {"status": "accepted", "action": "create"}
 
                 create_item_async.__name__ = (
                     f"create_{model_class.__name__.lower()}_async"
@@ -188,98 +216,142 @@ class ModelRegistry:
 
                 create_item.__name__ = f"create_{model_class.__name__.lower()}"
 
-        # 4. Obter (/{item_id})
-        if "read" not in exclude_set:
-
-            @self.router_builder.register_route(
-                f"{prefix}/{{item_id}}",
-                methods=["GET"],
-                response_model=model_class,
-                cache_prefix=prefix,
-                **route_kwargs,
-            )
-            async def get_item(item_id: int, session: Session = Depends(get_session)):
-                item = session.get(model_class, item_id)
-                if not item:
-                    raise HTTPException(status_code=404, detail="Item not found")
-                return item
-
-            get_item.__name__ = f"get_{model_class.__name__.lower()}"
-
         # 5. Atualização parcial (PATCH)
         if "update" not in exclude_set:
+            if async_mode:
 
-            @self.router_builder.register_route(
-                f"{prefix}/{{item_id}}",
-                methods=["PATCH"],
-                response_model=model_class,
-                cache_prefix=prefix,
-                **route_kwargs,
-            )
-            async def update_item(
-                item_id: int,
-                data: UpdateModel = Body(...),
-                session: Session = Depends(get_session),
-            ):
-                item = session.get(model_class, item_id)
-                if not item:
-                    raise HTTPException(status_code=404, detail="Item not found")
-                for key, value in data.model_dump(exclude_unset=True).items():
-                    setattr(item, key, value)
-                session.add(item)
-                session.commit()
-                session.refresh(item)
-                return item
+                @self.router_builder.register_route(
+                    f"{prefix}/{{item_id}}",
+                    methods=["PATCH"],
+                    status_code=202,
+                    cache_prefix=prefix,
+                    **route_kwargs,
+                )
+                async def update_item_async(
+                    item_id: int,
+                    data: UpdateModel = Body(...),
+                ):
+                    qm = self._queue_managers[model_class]
+                    payload = data.model_dump(exclude_unset=True)
+                    payload["id"] = item_id
+                    await qm.enqueue("update", payload)
+                    return {"status": "accepted", "action": "update", "id": item_id}
 
-            update_item.__name__ = f"update_{model_class.__name__.lower()}"
+                update_item_async.__name__ = (
+                    f"update_{model_class.__name__.lower()}_async"
+                )
+            else:
+
+                @self.router_builder.register_route(
+                    f"{prefix}/{{item_id}}",
+                    methods=["PATCH"],
+                    response_model=model_class,
+                    cache_prefix=prefix,
+                    **route_kwargs,
+                )
+                async def update_item(
+                    item_id: int,
+                    data: UpdateModel = Body(...),
+                    session: Session = Depends(get_session),
+                ):
+                    item = session.get(model_class, item_id)
+                    if not item:
+                        raise HTTPException(status_code=404, detail="Item not found")
+                    for key, value in data.model_dump(exclude_unset=True).items():
+                        setattr(item, key, value)
+                    session.add(item)
+                    session.commit()
+                    session.refresh(item)
+                    return item
+
+                update_item.__name__ = f"update_{model_class.__name__.lower()}"
 
         # 6. Substituição completa (PUT)
         if "put" not in exclude_set:
+            if async_mode:
 
-            @self.router_builder.register_route(
-                f"{prefix}/{{item_id}}",
-                methods=["PUT"],
-                response_model=model_class,
-                cache_prefix=prefix,
-                **route_kwargs,
-            )
-            async def put_item(
-                item_id: int,
-                data: CreateModel = Body(...),
-                session: Session = Depends(get_session),
-            ):
-                item = session.get(model_class, item_id)
-                if not item:
-                    raise HTTPException(status_code=404, detail="Item not found")
-                for key, value in data.model_dump().items():
-                    setattr(item, key, value)
-                session.add(item)
-                session.commit()
-                session.refresh(item)
-                return item
+                @self.router_builder.register_route(
+                    f"{prefix}/{{item_id}}",
+                    methods=["PUT"],
+                    status_code=202,
+                    cache_prefix=prefix,
+                    **route_kwargs,
+                )
+                async def put_item_async(
+                    item_id: int,
+                    data: CreateModel = Body(...),
+                ):
+                    qm = self._queue_managers[model_class]
+                    payload = data.model_dump()
+                    payload["id"] = item_id
+                    await qm.enqueue("update", payload)
+                    return {"status": "accepted", "action": "put", "id": item_id}
 
-            put_item.__name__ = f"put_{model_class.__name__.lower()}"
+                put_item_async.__name__ = f"put_{model_class.__name__.lower()}_async"
+            else:
 
-        # 7. Deletar
+                @self.router_builder.register_route(
+                    f"{prefix}/{{item_id}}",
+                    methods=["PUT"],
+                    response_model=model_class,
+                    cache_prefix=prefix,
+                    **route_kwargs,
+                )
+                async def put_item(
+                    item_id: int,
+                    data: CreateModel = Body(...),
+                    session: Session = Depends(get_session),
+                ):
+                    item = session.get(model_class, item_id)
+                    if not item:
+                        raise HTTPException(status_code=404, detail="Item not found")
+                    for key, value in data.model_dump().items():
+                        setattr(item, key, value)
+                    session.add(item)
+                    session.commit()
+                    session.refresh(item)
+                    return item
+
+                put_item.__name__ = f"put_{model_class.__name__.lower()}"
+
+        # 7. Deletar (DELETE)
         if "delete" not in exclude_set:
+            if async_mode:
 
-            @self.router_builder.register_route(
-                f"{prefix}/{{item_id}}",
-                methods=["DELETE"],
-                cache_prefix=prefix,
-                **route_kwargs,
-            )
-            async def delete_item(
-                item_id: int, session: Session = Depends(get_session)
-            ):
-                item = session.get(model_class, item_id)
-                if not item:
-                    raise HTTPException(status_code=404, detail="Item not found")
-                session.delete(item)
-                session.commit()
-                return {"detail": "Item deleted"}
+                @self.router_builder.register_route(
+                    f"{prefix}/{{item_id}}",
+                    methods=["DELETE"],
+                    status_code=202,
+                    cache_prefix=prefix,
+                    **route_kwargs,
+                )
+                async def delete_item_async(item_id: int):
+                    qm = self._queue_managers[model_class]
+                    await qm.enqueue("delete", {"id": item_id})
+                    return {"status": "accepted", "action": "delete", "id": item_id}
 
-            delete_item.__name__ = f"delete_{model_class.__name__.lower()}"
+                delete_item_async.__name__ = (
+                    f"delete_{model_class.__name__.lower()}_async"
+                )
+            else:
+
+                @self.router_builder.register_route(
+                    f"{prefix}/{{item_id}}",
+                    methods=["DELETE"],
+                    cache_prefix=prefix,
+                    **route_kwargs,
+                )
+                async def delete_item(
+                    item_id: int, session: Session = Depends(get_session)
+                ):
+                    item = session.get(model_class, item_id)
+                    if not item:
+                        raise HTTPException(status_code=404, detail="Item not found")
+                    session.delete(item)
+                    session.commit()
+                    return {"detail": "Item deleted"}
+
+                delete_item.__name__ = f"delete_{model_class.__name__.lower()}"
 
         print(
             f"🌿 Mossify: CRUD routes registered for {model_class.__name__} at {prefix}"
