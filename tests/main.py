@@ -1,17 +1,32 @@
 from mossify import Mossify
-
-app = Mossify(cache_ttl=60)
-
-
-@app.register_route("/hello")
-async def hello(name: str = "World"):
-    return {"message": f"Hello {name}!"}
+from sqlmodel import SQLModel, Field
+from typing import Optional
+from fastapi import Depends
 
 
-@app.register_route("/hello", methods=["POST"])
-async def update_hello(data: dict):
-    return {"status": "updated"}
+class Product(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    price: float
+    stock: int = 0
 
+
+app = Mossify(
+    database_url="sqlite:///products.db",
+    database_models=[Product],
+    enable_auth=True,
+)
+
+# Agora auth_dep já é uma dependência válida (Depends já foi aplicado?)
+# Não, app.auth_dep é a função pura. Então usamos Depends() no momento de passar.
+app.register_model(
+    Product,
+    async_mode=True,
+    batch_size=5_000,
+    flush_interval=5.0,
+    tags=["Products"],
+    auth_dep=app.auth_dep,  # aqui o ModelRegistry vai aplicar Depends(auth_dep)
+)
 
 if __name__ == "__main__":
-    app.run()
+    app.run(workers=1)

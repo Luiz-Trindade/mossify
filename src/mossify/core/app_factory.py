@@ -8,8 +8,4 @@ def create_fastapi_app(
 ) -> FastAPI:
     app = FastAPI(title=title, version=version, **fastapi_kwargs)
 
-    @app.get("/")
-    async def root():
-        return {"message": "🌿 Welcome to Mossify!"}
-
     return app

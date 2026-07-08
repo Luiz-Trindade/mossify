@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mossify"
-version = "0.1.4"
+version = "0.1.5"
 description = "🌿 Mossify – A simple, organic framework for FastAPI + SQLModel with automatic CRUD and intelligent caching."
 readme = "README.md"
 authors = [
@@ -20,6 +20,9 @@ requires-python = ">=3.9"
 dependencies = [
     "diskcache>=5.6.3",
     "fastapi>=0.100.0",
+    "passlib[bcrypt]>=1.7.4",
+    "python-jose[cryptography]>=3.5.0",
+    "python-multipart>=0.0.20",
     "sqlmodel>=0.0.14",
     "uvicorn>=0.23.0",
 ]
@@ -31,3 +34,6 @@ Repository = "https://github.com/seu-usuario/mossify"
 [tool.uv]
 [dependency-groups]
 dev = ["pytest>=7.0"]
+
+[project.scripts]
+mossify = "mossify.cli:main"
